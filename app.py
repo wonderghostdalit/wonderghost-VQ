@@ -90,7 +90,9 @@ if "word_dict" not in st.session_state:
 if "wrong_words" not in st.session_state:
     st.session_state.wrong_words = load_wrong_words()
 if "quiz_mode" not in st.session_state:
-    st.session_state.quiz_mode = "practice"
+    st.session_state.quiz_mode = "practice"  # 'practice', 'game_20', 'wrong_only'
+if "question_type" not in st.session_state:
+    st.session_state.question_type = "choice"  # 'choice' (객관식), 'subjective' (주관식)
 if "current_word" not in st.session_state:
     st.session_state.current_word = None
 if "current_options" not in st.session_state:
@@ -125,17 +127,15 @@ def next_question():
         st.session_state.current_word = None
         st.session_state.current_options = []
     else:
-        # 단어 선정
         curr_w = random.choice(pool)
         st.session_state.current_word = curr_w
 
-        # 정답 추출
         if st.session_state.quiz_mode == "wrong_only":
             correct_meaning = st.session_state.wrong_words.get(curr_w, "")
         else:
             correct_meaning = word_dict.get(curr_w, "")
 
-        # 보기 4개 미리 생성 후 세션에 고정 저장 (혼선 방지 핵심!)
+        # 객관식용 보기 고정 생성
         all_meanings = list(word_dict.values())
         wrong_options = [m for m in all_meanings if m != correct_meaning]
         sample_count = min(3, len(wrong_options))
@@ -156,7 +156,19 @@ if st.session_state.current_word is None:
 # UI 구성
 st.title("📖 전공영어 스마트 단어 퀴즈")
 
-# 모드 선택 버튼
+# 1. 문제 방식 선택 (객관식 / 주관식 라디오)
+q_type = st.radio(
+    "📝 문제 방식 선택",
+    ["4지선다 객관식", "뜻 직접 입력 (주관식)"],
+    horizontal=True,
+)
+new_q_type = "choice" if q_type == "4지선다 객관식" else "subjective"
+if new_q_type != st.session_state.question_type:
+    st.session_state.question_type = new_q_type
+    next_question()
+    st.rerun()
+
+# 2. 게임 모드 선택 버튼
 col1, col2, col3 = st.columns(3)
 with col1:
     if st.button("일반 연습", use_container_width=True):
@@ -230,36 +242,96 @@ else:
 
 st.info(f"### **{curr_word}**")
 
-# 고정된 보기 가져오기
-options = st.session_state.current_options
 
-# 보기 버튼 및 채점
-for i, opt in enumerate(options):
-    btn_disabled = st.session_state.answered
-    if st.button(
-        f"{i+1}. {opt}",
-        key=f"opt_{i}",
-        disabled=btn_disabled,
-        use_container_width=True,
-    ):
-        st.session_state.answered = True
-        st.session_state.total_asked += 1
+# 주관식 정답 판별 유연성 함수 (공백 제거 및 부분 키워드 일치 판단)
+def check_subjective_answer(user_input, target):
+    user_clean = re.sub(r"\s+", "", user_input.strip()).lower()
+    target_clean = re.sub(r"\s+", "", target.strip()).lower()
 
-        if opt == correct_meaning:
-            st.session_state.score += 1
-            st.session_state.feedback = ("success", "⭕ 정답입니다!")
-            if curr_word in st.session_state.wrong_words:
-                del st.session_state.wrong_words[curr_word]
+    if not user_clean:
+        return False
+    if user_clean in target_clean or target_clean in user_clean:
+        return True
+
+    # 쉼표(,) 구분 키워드 중 하나라도 들어맞는지 확인
+    keywords = [k.strip() for k in target.replace("/", ",").split(",") if k]
+    for kw in keywords:
+        kw_clean = re.sub(r"\s+", "", kw).lower()
+        if kw_clean and (kw_clean in user_clean or user_clean in kw_clean):
+            return True
+    return False
+
+
+# --------------------------------------------------
+# 모드 1: 4지선다 객관식
+# --------------------------------------------------
+if st.session_state.question_type == "choice":
+    options = st.session_state.current_options
+    for i, opt in enumerate(options):
+        btn_disabled = st.session_state.answered
+        if st.button(
+            f"{i+1}. {opt}",
+            key=f"opt_{i}",
+            disabled=btn_disabled,
+            use_container_width=True,
+        ):
+            st.session_state.answered = True
+            st.session_state.total_asked += 1
+
+            if opt == correct_meaning:
+                st.session_state.score += 1
+                st.session_state.feedback = ("success", "⭕ 정답입니다!")
+                if curr_word in st.session_state.wrong_words:
+                    del st.session_state.wrong_words[curr_word]
+                    save_wrong_words(st.session_state.wrong_words)
+            else:
+                st.session_state.feedback = (
+                    "error",
+                    f"❌ 오답입니다. (정답: {correct_meaning})",
+                )
+                st.session_state.wrong_words[curr_word] = correct_meaning
                 save_wrong_words(st.session_state.wrong_words)
-        else:
-            st.session_state.feedback = (
-                "error",
-                f"❌ 오답입니다. (정답: {correct_meaning})",
-            )
-            st.session_state.wrong_words[curr_word] = correct_meaning
-            save_wrong_words(st.session_state.wrong_words)
 
-        st.rerun()
+            st.rerun()
+
+# --------------------------------------------------
+# 모드 2: 뜻 직접 입력 (주관식)
+# --------------------------------------------------
+else:
+    with st.form(key="subjective_form", clear_on_submit=False):
+        user_ans = st.text_input(
+            "단어의 뜻을 입력하세요:",
+            placeholder="예: 접근성, 사회복지...",
+            disabled=st.session_state.answered,
+        )
+        submit_btn = st.form_submit_button(
+            "정답 제출",
+            use_container_width=True,
+            disabled=st.session_state.answered,
+        )
+
+        if submit_btn:
+            st.session_state.answered = True
+            st.session_state.total_asked += 1
+
+            if check_subjective_answer(user_ans, correct_meaning):
+                st.session_state.score += 1
+                st.session_state.feedback = (
+                    "success",
+                    f"⭕ 정답입니다! (사전 뜻: {correct_meaning})",
+                )
+                if curr_word in st.session_state.wrong_words:
+                    del st.session_state.wrong_words[curr_word]
+                    save_wrong_words(st.session_state.wrong_words)
+            else:
+                st.session_state.feedback = (
+                    "error",
+                    f"❌ 오답입니다. (제출한 답: {user_ans} / 정답: {correct_meaning})",
+                )
+                st.session_state.wrong_words[curr_word] = correct_meaning
+                save_wrong_words(st.session_state.wrong_words)
+
+            st.rerun()
 
 # 결과 피드백 및 다음 문제 버튼
 if st.session_state.feedback:
