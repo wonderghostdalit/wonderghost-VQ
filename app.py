@@ -2,6 +2,7 @@ import json
 import os
 import random
 import re
+from google import genai
 import pdfplumber
 import streamlit as st
 
@@ -12,6 +13,19 @@ st.set_page_config(
 
 PDF_FILE_NAME = "단어장.pdf"
 WRONG_WORDS_FILE = "wrong_words.json"
+
+
+# Gemini API 클라이언트 초기화 (Streamlit Secrets에서 키 탐색)
+def get_ai_client():
+    api_key = os.environ.get("GEMINI_API_KEY") or st.secrets.get(
+        "GEMINI_API_KEY"
+    )
+    if api_key:
+        try:
+            return genai.Client(api_key=api_key)
+        except Exception:
+            return None
+    return None
 
 
 # 1. PDF 데이터 로드 및 파싱
@@ -84,15 +98,67 @@ def save_wrong_words(wrong_dict):
         print(f"오답노트 저장 실패: {e}")
 
 
+# AI 유연 채점 함수 (의미가 통하면 정답 인정)
+def judge_with_ai(english_word, user_answer, dictionary_meaning):
+    # 1차: 규칙 기반 완전/문자열 일치 빠른 검사
+    u_clean = re.sub(r"\s+", "", user_answer.strip()).lower()
+    d_clean = re.sub(r"\s+", "", dictionary_meaning.strip()).lower()
+
+    if u_clean and (u_clean in d_clean or d_clean in u_clean):
+        return True, "정확히 일치합니다."
+
+    # 2차: AI API를 이용한 정교한 번역 의미 검증
+    client = get_ai_client()
+    if client:
+        try:
+            prompt = f"""
+            영어 단어 '{english_word}'의 사전적 뜻은 '{dictionary_meaning}'입니다.
+            사용자가 입력한 답변: '{user_answer}'
+            
+            사용자가 입력한 답변이 사전적 뜻과 한국어 번역상 의미가 통하거나 유의어/동의어로 정답 처리할 수 있는지 판단해 주세요.
+            반드시 첫 줄에 'CORRECT' 또는 'INCORRECT'로만 판단 결과를 적고, 둘째 줄에 짧은 사유를 작성해 주세요.
+            """
+            response = client.models.generate_content(
+                model="gemini-2.5-flash", contents=prompt
+            )
+            text_res = response.text.strip()
+            if text_res.startswith("CORRECT"):
+                reason = (
+                    text_res.split("\n")[1]
+                    if "\n" in text_res
+                    else "의미상 동의어로 인정되었습니다."
+                )
+                return True, reason
+            else:
+                reason = (
+                    text_res.split("\n")[1]
+                    if "\n" in text_res
+                    else "사전적 의미와 차이가 있습니다."
+                )
+                return False, reason
+        except Exception as e:
+            print(f"AI 채점 중 오류 발생: {e}")
+
+    # API 키가 없거나 실패 시 유연 규칙 백업 채점
+    keywords = [
+        k.strip() for k in dictionary_meaning.replace("/", ",").split(",") if k
+    ]
+    for kw in keywords:
+        kw_clean = re.sub(r"\s+", "", kw).lower()
+        if kw_clean and (kw_clean in u_clean or u_clean in kw_clean):
+            return True, "핵심 단어가 일치합니다."
+    return False, "의미가 일치하지 않습니다."
+
+
 # 세션 상태 초기화
 if "word_dict" not in st.session_state:
     st.session_state.word_dict = load_pdf_data()
 if "wrong_words" not in st.session_state:
     st.session_state.wrong_words = load_wrong_words()
 if "quiz_mode" not in st.session_state:
-    st.session_state.quiz_mode = "practice"  # 'practice', 'game_20', 'wrong_only'
+    st.session_state.quiz_mode = "practice"
 if "question_type" not in st.session_state:
-    st.session_state.question_type = "choice"  # 'choice' (객관식), 'subjective' (주관식)
+    st.session_state.question_type = "choice"
 if "current_word" not in st.session_state:
     st.session_state.current_word = None
 if "current_options" not in st.session_state:
@@ -135,7 +201,6 @@ def next_question():
         else:
             correct_meaning = word_dict.get(curr_w, "")
 
-        # 객관식용 보기 고정 생성
         all_meanings = list(word_dict.values())
         wrong_options = [m for m in all_meanings if m != correct_meaning]
         sample_count = min(3, len(wrong_options))
@@ -156,10 +221,10 @@ if st.session_state.current_word is None:
 # UI 구성
 st.title("📖 전공영어 스마트 단어 퀴즈")
 
-# 1. 문제 방식 선택 (객관식 / 주관식 라디오)
+# 1. 문제 방식 선택
 q_type = st.radio(
     "📝 문제 방식 선택",
-    ["4지선다 객관식", "뜻 직접 입력 (주관식)"],
+    ["4지선다 객관식", "🤖 AI 유연 주관식 채점"],
     horizontal=True,
 )
 new_q_type = "choice" if q_type == "4지선다 객관식" else "subjective"
@@ -242,26 +307,6 @@ else:
 
 st.info(f"### **{curr_word}**")
 
-
-# 주관식 정답 판별 유연성 함수 (공백 제거 및 부분 키워드 일치 판단)
-def check_subjective_answer(user_input, target):
-    user_clean = re.sub(r"\s+", "", user_input.strip()).lower()
-    target_clean = re.sub(r"\s+", "", target.strip()).lower()
-
-    if not user_clean:
-        return False
-    if user_clean in target_clean or target_clean in user_clean:
-        return True
-
-    # 쉼표(,) 구분 키워드 중 하나라도 들어맞는지 확인
-    keywords = [k.strip() for k in target.replace("/", ",").split(",") if k]
-    for kw in keywords:
-        kw_clean = re.sub(r"\s+", "", kw).lower()
-        if kw_clean and (kw_clean in user_clean or user_clean in kw_clean):
-            return True
-    return False
-
-
 # --------------------------------------------------
 # 모드 1: 4지선다 객관식
 # --------------------------------------------------
@@ -295,17 +340,17 @@ if st.session_state.question_type == "choice":
             st.rerun()
 
 # --------------------------------------------------
-# 모드 2: 뜻 직접 입력 (주관식)
+# 모드 2: 🤖 AI 유연 주관식 채점
 # --------------------------------------------------
 else:
     with st.form(key="subjective_form", clear_on_submit=False):
         user_ans = st.text_input(
             "단어의 뜻을 입력하세요:",
-            placeholder="예: 접근성, 사회복지...",
+            placeholder="동의어나 유의어로 자유롭게 적어보세요...",
             disabled=st.session_state.answered,
         )
         submit_btn = st.form_submit_button(
-            "정답 제출",
+            "AI 심사 제출",
             use_container_width=True,
             disabled=st.session_state.answered,
         )
@@ -314,11 +359,16 @@ else:
             st.session_state.answered = True
             st.session_state.total_asked += 1
 
-            if check_subjective_answer(user_ans, correct_meaning):
+            with st.spinner("🤖 AI가 의미 판별 중..."):
+                is_correct, reason = judge_with_ai(
+                    curr_word, user_ans, correct_meaning
+                )
+
+            if is_correct:
                 st.session_state.score += 1
                 st.session_state.feedback = (
                     "success",
-                    f"⭕ 정답입니다! (사전 뜻: {correct_meaning})",
+                    f"⭕ 정답입니다! ({reason})\n- 사전 뜻: {correct_meaning}",
                 )
                 if curr_word in st.session_state.wrong_words:
                     del st.session_state.wrong_words[curr_word]
@@ -326,7 +376,7 @@ else:
             else:
                 st.session_state.feedback = (
                     "error",
-                    f"❌ 오답입니다. (제출한 답: {user_ans} / 정답: {correct_meaning})",
+                    f"❌ 오답입니다. ({reason})\n- 제출한 답: {user_ans}\n- 사전 뜻: {correct_meaning}",
                 )
                 st.session_state.wrong_words[curr_word] = correct_meaning
                 save_wrong_words(st.session_state.wrong_words)
