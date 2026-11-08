@@ -2,415 +2,256 @@ import json
 import os
 import random
 import re
-import tkinter as tk
-from tkinter import font, messagebox
 import pdfplumber
+import streamlit as st
 
-# --------------------------------------------------
-# [고해상도 디스플레이 DPI 깨짐 방지 설정]
-# --------------------------------------------------
-try:
-    from ctypes import windll
-
-    windll.shcore.SetProcessDpiAwareness(1)
-except Exception:
-    pass
+# 페이지 기본 설정
+st.set_page_config(
+    page_title="전공영어 스마트 단어 퀴즈", page_icon="📖", layout="centered"
+)
 
 PDF_FILE_NAME = "단어장.pdf"
 WRONG_WORDS_FILE = "wrong_words.json"
 
 
-class VocabQuizApp:
+# 1. PDF 데이터 로드 및 파싱
+@st.cache_data
+def load_pdf_data():
+    extracted_dict = {}
+    if not os.path.exists(PDF_FILE_NAME):
+        return None
 
-    def __init__(self, root):
-        self.root = root
-        self.root.title("전공영어 퀴즈 프로그램")
-        self.root.configure(bg="#F4F6F9")
+    try:
+        with pdfplumber.open(PDF_FILE_NAME) as pdf:
+            for page in pdf.pages:
+                tables = page.extract_tables()
+                for table in tables:
+                    for row in table:
+                        if len(row) >= 2:
+                            w = re.sub(r"[★☐Πコロ]", "", row[0] or "").strip()
+                            m = re.sub(r"[★☐Πコロ]", "", row[1] or "").strip()
+                            if (
+                                w
+                                and m
+                                and w not in ["영어", "목차"]
+                                and m not in ["한글 뜻", "암기"]
+                            ):
+                                extracted_dict[w] = m
 
-        # 1. 고정 픽셀 대신 사용자 화면 크기를 계산하여 넉넉하게 자동 할당
-        screen_width = self.root.winfo_screenwidth()
-        screen_height = self.root.winfo_screenheight()
+                if not tables:
+                    text = page.extract_text()
+                    if text:
+                        for line in text.split("\n"):
+                            if "|" in line:
+                                parts = line.split("|")
+                                if len(parts) >= 2:
+                                    w = re.sub(
+                                        r"[★☐Πコロ]", "", parts[0]
+                                    ).strip()
+                                    m = re.sub(
+                                        r"[★☐Πコロ]", "", parts[1]
+                                    ).strip()
+                                    if (
+                                        w
+                                        and m
+                                        and w not in ["영어", "목차"]
+                                        and m not in ["한글 뜻", "암기"]
+                                    ):
+                                        extracted_dict[w] = m
+    except Exception as e:
+        st.error(f"PDF 파일 처리 중 오류 발생: {e}")
+        return None
 
-        app_width = int(screen_width * 0.55)
-        app_height = int(screen_height * 0.85)
+    return extracted_dict
 
-        # 최소 크기 지정 및 초기 크기 할당
-        self.root.minsize(600, 700)
-        self.root.geometry(f"{app_width}x{app_height}+100+50")
 
-        # 폰트 설정
-        self.font_title = font.Font(
-            family="Malgun Gothic", size=15, weight="bold"
-        )
-        self.font_sub = font.Font(family="Malgun Gothic", size=10)
-        self.font_word = font.Font(
-            family="Malgun Gothic", size=20, weight="bold"
-        )
-        self.font_btn = font.Font(family="Malgun Gothic", size=11)
-        self.font_feedback = font.Font(
-            family="Malgun Gothic", size=12, weight="bold"
-        )
-
-        # 데이터 변수
-        self.word_dict = {}
-        self.words_list = []
-        self.wrong_words = self.load_wrong_words()
-
-        # 퀴즈 상태 변수
-        self.quiz_mode = "practice"
-        self.current_word = ""
-        self.correct_answer = ""
-        self.score = 0
-        self.total_asked = 0
-        self.max_questions = 0
-
-        self.create_widgets()
-        self.load_pdf_automatically()
-
-    def load_wrong_words(self):
-        if os.path.exists(WRONG_WORDS_FILE):
-            try:
-                with open(WRONG_WORDS_FILE, "r", encoding="utf-8") as f:
-                    return json.load(f)
-            except Exception:
-                return {}
-        return {}
-
-    def save_wrong_words(self):
+# 2. 오답노트 처리
+def load_wrong_words():
+    if os.path.exists(WRONG_WORDS_FILE):
         try:
-            with open(WRONG_WORDS_FILE, "w", encoding="utf-8") as f:
-                json.dump(self.wrong_words, f, ensure_ascii=False, indent=2)
-        except Exception as e:
-            print(f"오답노트 저장 실패: {e}")
+            with open(WRONG_WORDS_FILE, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except Exception:
+            return {}
+    return {}
 
-    def create_widgets(self):
-        # 상단 헤더 프레임 (여백 절감)
-        header_frame = tk.Frame(self.root, bg="#2C3E50", pady=8)
-        header_frame.pack(fill="x")
 
-        self.lbl_title = tk.Label(
-            header_frame,
-            text="📖 전공영어 스마트 단어 퀴즈",
-            font=self.font_title,
-            fg="#FFFFFF",
-            bg="#2C3E50",
-        )
-        self.lbl_title.pack()
+def save_wrong_words(wrong_dict):
+    try:
+        with open(WRONG_WORDS_FILE, "w", encoding="utf-8") as f:
+            json.dump(wrong_dict, f, ensure_ascii=False, indent=2)
+    except Exception as e:
+        print(f"오답노트 저장 실패: {e}")
 
-        # 모드 선택 버튼 영역
-        mode_frame = tk.Frame(self.root, bg="#F4F6F9")
-        mode_frame.pack(fill="x", pady=6)
 
-        self.btn_mode_practice = tk.Button(
-            mode_frame,
-            text="일반 무제한 연습",
-            font=self.font_sub,
-            bg="#34495E",
-            fg="white",
-            relief="flat",
-            padx=10,
-            pady=3,
-            command=lambda: self.start_quiz("practice"),
-        )
-        self.btn_mode_practice.pack(side="left", padx=15)
+# 세션 상태 초기화
+if "word_dict" not in st.session_state:
+    st.session_state.word_dict = load_pdf_data()
+if "wrong_words" not in st.session_state:
+    st.session_state.wrong_words = load_wrong_words()
+if "quiz_mode" not in st.session_state:
+    st.session_state.quiz_mode = "practice"
+if "current_word" not in st.session_state:
+    st.session_state.current_word = None
+if "score" not in st.session_state:
+    st.session_state.score = 0
+if "total_asked" not in st.session_state:
+    st.session_state.total_asked = 0
+if "answered" not in st.session_state:
+    st.session_state.answered = False
+if "feedback" not in st.session_state:
+    st.session_state.feedback = None
 
-        self.btn_mode_20 = tk.Button(
-            mode_frame,
-            text="🎮 20문제 Challenge",
-            font=self.font_sub,
-            bg="#27AE60",
-            fg="white",
-            relief="flat",
-            padx=10,
-            pady=3,
-            command=lambda: self.start_quiz("game_20"),
-        )
-        self.btn_mode_20.pack(side="left", padx=5)
+word_dict = st.session_state.word_dict
 
-        self.btn_mode_wrong = tk.Button(
-            mode_frame,
-            text="✍️ 오답노트 퀴즈",
-            font=self.font_sub,
-            bg="#E67E22",
-            fg="white",
-            relief="flat",
-            padx=10,
-            pady=3,
-            command=lambda: self.start_quiz("wrong_only"),
-        )
-        self.btn_mode_wrong.pack(side="right", padx=15)
+if not word_dict:
+    st.error(
+        f"'{PDF_FILE_NAME}' 파일을 찾을 수 없거나 단어를 추출하지 못했습니다."
+    )
+    st.stop()
 
-        # 점수 및 정보 프레임
-        info_frame = tk.Frame(self.root, bg="#F4F6F9")
-        info_frame.pack(fill="x", padx=20, pady=2)
 
-        self.lbl_score = tk.Label(
-            info_frame,
-            text="점수: 0 / 0",
-            font=self.font_sub,
-            fg="#555555",
-            bg="#F4F6F9",
-        )
-        self.lbl_score.pack(side="left")
+def get_words_pool():
+    if st.session_state.quiz_mode == "wrong_only":
+        return list(st.session_state.wrong_words.keys())
+    return list(word_dict.keys())
 
-        self.lbl_wrong_count = tk.Label(
-            info_frame,
-            text=f"누적 오답: {len(self.wrong_words)}개",
-            font=self.font_sub,
-            fg="#C0392B",
-            bg="#F4F6F9",
-        )
-        self.lbl_wrong_count.pack(side="right")
 
-        # 단어 표시 카드 (높이를 높이지 않고 유연하게 배치)
-        card_frame = tk.Frame(
-            self.root,
-            bg="#FFFFFF",
-            highlightbackground="#D5D8DC",
-            highlightthickness=1,
-            pady=10,
-        )
-        card_frame.pack(fill="x", padx=20, pady=8)
+def next_question():
+    pool = get_words_pool()
+    if not pool:
+        st.session_state.current_word = None
+    else:
+        st.session_state.current_word = random.choice(pool)
+    st.session_state.answered = False
+    st.session_state.feedback = None
 
-        self.lbl_word = tk.Label(
-            card_frame,
-            text="단어를 불러오는 중...",
-            font=self.font_word,
-            fg="#16A085",
-            bg="#FFFFFF",
-            wraplength=700,
-        )
-        self.lbl_word.pack(expand=True, pady=10)
 
-        # 피드백 메세지 레이블
-        self.lbl_feedback = tk.Label(
-            self.root, text="", font=self.font_feedback, bg="#F4F6F9"
-        )
-        self.lbl_feedback.pack(pady=2)
+if st.session_state.current_word is None:
+    next_question()
 
-        # 보기 버튼 영역 (4지선다 - 패딩 최소화)
-        self.option_buttons = []
-        for i in range(4):
-            btn = tk.Button(
-                self.root,
-                text="",
-                font=self.font_btn,
-                width=50,
-                pady=5,
-                state=tk.DISABLED,
-                bg="#FFFFFF",
-                fg="#2C3E50",
-                activebackground="#EAECEE",
-                relief="groove",
-                bd=1,
-            )
-            btn.pack(pady=3)
-            self.option_buttons.append(btn)
+# UI 구성
+st.title("📖 전공영어 스마트 단어 퀴즈")
 
-        # 하단 컨트롤 영역 ([다음 문제] 버튼)
-        bottom_frame = tk.Frame(self.root, bg="#F4F6F9")
-        bottom_frame.pack(fill="x", pady=10)
+# 모드 선택 버튼
+col1, col2, col3 = st.columns(3)
+with col1:
+    if st.button("일반 연습", use_container_width=True):
+        st.session_state.quiz_mode = "practice"
+        st.session_state.score = 0
+        st.session_state.total_asked = 0
+        next_question()
+        st.rerun()
 
-        self.btn_next = tk.Button(
-            bottom_frame,
-            text="다음 문제 ➔",
-            font=self.font_btn,
-            bg="#2980B9",
-            fg="#FFFFFF",
-            disabledforeground="#E0E0E0",
-            relief="flat",
-            padx=25,
-            pady=6,
-            state=tk.DISABLED,
-            command=self.next_question,
-        )
-        self.btn_next.pack()
+with col2:
+    if st.button("🎮 20문제 챌린지", use_container_width=True):
+        st.session_state.quiz_mode = "game_20"
+        st.session_state.score = 0
+        st.session_state.total_asked = 0
+        next_question()
+        st.rerun()
 
-    def clean_text(self, text):
-        if not text:
-            return ""
-        cleaned = re.sub(r"[★☐Πコロ]", "", text)
-        return cleaned.strip()
-
-    def load_pdf_automatically(self):
-        if not os.path.exists(PDF_FILE_NAME):
-            messagebox.showerror(
-                "파일 오류",
-                f"'{PDF_FILE_NAME}' 파일을 찾을 수 없습니다.\n"
-                "파이썬 코드가 있는 동일한 폴더에 '단어장.pdf' 파일을 넣어주세요.",
-            )
-            self.lbl_word.config(text="파일 없음")
-            return
-
-        extracted_dict = {}
-        try:
-            with pdfplumber.open(PDF_FILE_NAME) as pdf:
-                for page in pdf.pages:
-                    tables = page.extract_tables()
-                    for table in tables:
-                        for row in table:
-                            if len(row) >= 2:
-                                word = self.clean_text(row[0])
-                                meaning = self.clean_text(row[1])
-
-                                if (
-                                    word
-                                    and meaning
-                                    and word not in ["영어", "목차"]
-                                    and meaning not in ["한글 뜻", "암기"]
-                                ):
-                                    extracted_dict[word] = meaning
-
-                    if not tables:
-                        text = page.extract_text()
-                        if text:
-                            lines = text.split("\n")
-                            for line in lines:
-                                if "|" in line:
-                                    parts = line.split("|")
-                                    if len(parts) >= 2:
-                                        w = self.clean_text(parts[0])
-                                        m = self.clean_text(parts[1])
-                                        if (
-                                            w
-                                            and m
-                                            and w not in ["영어", "목차"]
-                                            and m not in ["한글 뜻", "암기"]
-                                        ):
-                                            extracted_dict[w] = m
-
-            if not extracted_dict:
-                messagebox.showwarning(
-                    "경고", "PDF에서 단어를 추출하지 못했습니다."
-                )
-                self.lbl_word.config(text="단어 추출 실패")
-                return
-
-            self.word_dict = extracted_dict
-            self.start_quiz("practice")
-
-        except Exception as e:
-            messagebox.showerror("오류", f"PDF를 읽는 도중 오류가 발생했습니다: {e}")
-
-    def start_quiz(self, mode):
-        self.quiz_mode = mode
-        self.score = 0
-        self.total_asked = 0
-
-        if mode == "game_20":
-            self.max_questions = 20
-            self.words_list = list(self.word_dict.keys())
-            messagebox.showinfo(
-                "20문제 Challenge",
-                "총 20문제가 출제됩니다!\n준비되셨으면 시작하세요.",
-            )
-        elif mode == "wrong_only":
-            if not self.wrong_words:
-                messagebox.showinfo(
-                    "오답노트 비어있음",
-                    "저장된 오답이 없습니다! 일반 모드로 시작합니다.",
-                )
-                self.start_quiz("practice")
-                return
-            self.max_questions = 0
-            self.words_list = list(self.wrong_words.keys())
-            messagebox.showinfo(
-                "오답노트 모드",
-                f"틀렸던 단어 {len(self.words_list)}개를 집중 학습합니다.",
-            )
+with col3:
+    if st.button("✍️ 오답노트 퀴즈", use_container_width=True):
+        if not st.session_state.wrong_words:
+            st.toast("저장된 오답이 없습니다!")
         else:
-            self.max_questions = 0
-            self.words_list = list(self.word_dict.keys())
+            st.session_state.quiz_mode = "wrong_only"
+            st.session_state.score = 0
+            st.session_state.total_asked = 0
+            next_question()
+            st.rerun()
 
-        self.next_question()
+st.divider()
 
-    def next_question(self):
-        if self.quiz_mode == "game_20" and self.total_asked >= self.max_questions:
-            messagebox.showinfo(
-                "게임 완료!",
-                f"🎉 20문제를 모두 풀었습니다!\n\n최종 점수: {self.score} / 20 점",
-            )
-            self.start_quiz("practice")
-            return
+# 점수판
+info_col1, info_col2 = st.columns(2)
+with info_col1:
+    if st.session_state.quiz_mode == "game_20":
+        st.caption(
+            f"**진행:** {st.session_state.total_asked} / 20 문제 | **점수:** {st.session_state.score}점"
+        )
+    else:
+        st.caption(
+            f"**점수:** {st.session_state.score} / {st.session_state.total_asked}"
+        )
+with info_col2:
+    st.caption(f"**누적 오답:** {len(st.session_state.wrong_words)}개")
 
-        if not self.words_list:
-            return
+# 20문제 게임 완료 체크
+if (
+    st.session_state.quiz_mode == "game_20"
+    and st.session_state.total_asked >= 20
+):
+    st.balloons()
+    st.success(
+        f"🎉 20문제를 모두 풀었습니다! 최종 점수: {st.session_state.score} / 20 점"
+    )
+    if st.button("다시 도전하기", use_container_width=True):
+        st.session_state.score = 0
+        st.session_state.total_asked = 0
+        next_question()
+        st.rerun()
+    st.stop()
 
-        self.lbl_feedback.config(text="")
-        self.btn_next.config(state=tk.DISABLED, bg="#BDC3C7", fg="#FFFFFF")
+# 문제 출력 카드
+curr_word = st.session_state.current_word
+if not curr_word:
+    st.warning("출제할 단어가 없습니다.")
+    st.stop()
 
-        self.current_word = random.choice(self.words_list)
-        if self.quiz_mode == "wrong_only":
-            self.correct_answer = self.wrong_words[self.current_word]
+if st.session_state.quiz_mode == "wrong_only":
+    correct_meaning = st.session_state.wrong_words.get(curr_word, "")
+else:
+    correct_meaning = word_dict.get(curr_word, "")
+
+st.info(f"### **{curr_word}**")
+
+# 보기 생성 (정답 1개 + 오답 3개)
+all_meanings = list(word_dict.values())
+wrong_options = [m for m in all_meanings if m != correct_meaning]
+sample_count = min(3, len(wrong_options))
+
+options = random.sample(wrong_options, sample_count) + [correct_meaning]
+random.shuffle(options)
+
+# 보기 버튼 및 채점
+for i, opt in enumerate(options):
+    btn_disabled = st.session_state.answered
+    if st.button(
+        f"{i+1}. {opt}",
+        key=f"opt_{i}",
+        disabled=btn_disabled,
+        use_container_width=True,
+    ):
+        st.session_state.answered = True
+        st.session_state.total_asked += 1
+
+        if opt == correct_meaning:
+            st.session_state.score += 1
+            st.session_state.feedback = ("success", "⭕ 정답입니다!")
+            if curr_word in st.session_state.wrong_words:
+                del st.session_state.wrong_words[curr_word]
+                save_wrong_words(st.session_state.wrong_words)
         else:
-            self.correct_answer = self.word_dict[self.current_word]
-
-        self.lbl_word.config(text=self.current_word)
-
-        if self.quiz_mode == "game_20":
-            self.lbl_score.config(
-                text=f"진행: {self.total_asked + 1} / 20 문제  |  점수: {self.score}점"
+            st.session_state.feedback = (
+                "error",
+                f"❌ 오답입니다. (정답: {correct_meaning})",
             )
-        else:
-            self.lbl_score.config(
-                text=f"점수: {self.score} / {self.total_asked}"
-            )
+            st.session_state.wrong_words[curr_word] = correct_meaning
+            save_wrong_words(st.session_state.wrong_words)
 
-        self.lbl_wrong_count.config(text=f"누적 오답: {len(self.wrong_words)}개")
+        st.rerun()
 
-        all_meanings = list(self.word_dict.values())
-        wrong_options = [m for m in all_meanings if m != self.correct_answer]
+# 결과 피드백 및 다음 문제 버튼
+if st.session_state.feedback:
+    fb_type, fb_msg = st.session_state.feedback
+    if fb_type == "success":
+        st.success(fb_msg)
+    else:
+        st.error(fb_msg)
 
-        sample_count = min(3, len(wrong_options))
-        options = random.sample(wrong_options, sample_count) + [
-            self.correct_answer
-        ]
-        random.shuffle(options)
-
-        for i, option in enumerate(options):
-            self.option_buttons[i].config(
-                text=f"{i+1}. {option}",
-                state=tk.NORMAL,
-                bg="#FFFFFF",
-                fg="#2C3E50",
-                command=lambda opt=option: self.check_answer(opt),
-            )
-
-    def check_answer(self, selected_option):
-        self.total_asked += 1
-
-        for btn in self.option_buttons:
-            btn.config(state=tk.DISABLED)
-
-        self.btn_next.config(state=tk.NORMAL, bg="#2980B9", fg="#FFFFFF")
-
-        if selected_option == self.correct_answer:
-            self.score += 1
-            self.lbl_feedback.config(text="⭕ 정답입니다!", fg="#27AE60")
-
-            if self.current_word in self.wrong_words:
-                del self.wrong_words[self.current_word]
-                self.save_wrong_words()
-        else:
-            self.lbl_feedback.config(
-                text=f"❌ 오답입니다. (정답: {self.correct_answer})", fg="#C0392B"
-            )
-
-            self.wrong_words[self.current_word] = self.correct_answer
-            self.save_wrong_words()
-
-        if self.quiz_mode == "game_20":
-            self.lbl_score.config(
-                text=f"진행: {self.total_asked} / 20 문제  |  점수: {self.score}점"
-            )
-        else:
-            self.lbl_score.config(
-                text=f"점수: {self.score} / {self.total_asked}"
-            )
-        self.lbl_wrong_count.config(text=f"누적 오답: {len(self.wrong_words)}개")
-
-
-if __name__ == "__main__":
-    root = tk.Tk()
-    app = VocabQuizApp(root)
-    root.mainloop()
+if st.session_state.answered:
+    if st.button("다음 문제 ➔", type="primary", use_container_width=True):
+        next_question()
+        st.rerun()
