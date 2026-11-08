@@ -93,6 +93,8 @@ if "quiz_mode" not in st.session_state:
     st.session_state.quiz_mode = "practice"
 if "current_word" not in st.session_state:
     st.session_state.current_word = None
+if "current_options" not in st.session_state:
+    st.session_state.current_options = []
 if "score" not in st.session_state:
     st.session_state.score = 0
 if "total_asked" not in st.session_state:
@@ -121,8 +123,29 @@ def next_question():
     pool = get_words_pool()
     if not pool:
         st.session_state.current_word = None
+        st.session_state.current_options = []
     else:
-        st.session_state.current_word = random.choice(pool)
+        # 단어 선정
+        curr_w = random.choice(pool)
+        st.session_state.current_word = curr_w
+
+        # 정답 추출
+        if st.session_state.quiz_mode == "wrong_only":
+            correct_meaning = st.session_state.wrong_words.get(curr_w, "")
+        else:
+            correct_meaning = word_dict.get(curr_w, "")
+
+        # 보기 4개 미리 생성 후 세션에 고정 저장 (혼선 방지 핵심!)
+        all_meanings = list(word_dict.values())
+        wrong_options = [m for m in all_meanings if m != correct_meaning]
+        sample_count = min(3, len(wrong_options))
+
+        options = random.sample(wrong_options, sample_count) + [
+            correct_meaning
+        ]
+        random.shuffle(options)
+        st.session_state.current_options = options
+
     st.session_state.answered = False
     st.session_state.feedback = None
 
@@ -207,13 +230,8 @@ else:
 
 st.info(f"### **{curr_word}**")
 
-# 보기 생성 (정답 1개 + 오답 3개)
-all_meanings = list(word_dict.values())
-wrong_options = [m for m in all_meanings if m != correct_meaning]
-sample_count = min(3, len(wrong_options))
-
-options = random.sample(wrong_options, sample_count) + [correct_meaning]
-random.shuffle(options)
+# 고정된 보기 가져오기
+options = st.session_state.current_options
 
 # 보기 버튼 및 채점
 for i, opt in enumerate(options):
