@@ -33,7 +33,23 @@ def get_ai_client():
     return None
 
 
-# 1. PDF 데이터 로드 및 파싱
+# 유효한 영단어-한글뜻 쌍인지 검증하는 필터 함수
+def is_valid_vocab_pair(word, meaning):
+    if not word or not meaning:
+        return False
+    # 제외할 헤더 키워드
+    if word in ["영어", "목차", "단어", "표현"] or meaning in ["한글 뜻", "암기", "뜻", "의미"]:
+        return False
+    # 1. 첫 번째 칸(영단어)에 반드시 영어 알파벳이 1개 이상 포함되어야 함 (한글 제목/소제목 차단)
+    if not re.search(r"[a-zA-Z]", word):
+        return False
+    # 2. 두 번째 칸(한글 뜻)에 반드시 한글이 1개 이상 포함되어야 함
+    if not re.search(r"[가-힣]", meaning):
+        return False
+    return True
+
+
+# 1. PDF 데이터 로드 및 파싱 (영단어 필터링 적용)
 @st.cache_data
 def load_pdf_data():
     extracted_dict = {}
@@ -49,12 +65,10 @@ def load_pdf_data():
                         if len(row) >= 2:
                             w = re.sub(r"[★☐Πコロ]", "", row[0] or "").strip()
                             m = re.sub(r"[★☐Πコロ]", "", row[1] or "").strip()
-                            if (
-                                w
-                                and m
-                                and w not in ["영어", "목차"]
-                                and m not in ["한글 뜻", "암기"]
-                            ):
+                            # 줄바꿈이 포함된 셀 정리
+                            w = re.sub(r"\s+", " ", w)
+                            m = re.sub(r"\s+", " ", m)
+                            if is_valid_vocab_pair(w, m):
                                 extracted_dict[w] = m
 
                 if not tables:
@@ -70,12 +84,7 @@ def load_pdf_data():
                                     m = re.sub(
                                         r"[★☐Πコロ]", "", parts[1]
                                     ).strip()
-                                    if (
-                                        w
-                                        and m
-                                        and w not in ["영어", "목차"]
-                                        and m not in ["한글 뜻", "암기"]
-                                    ):
+                                    if is_valid_vocab_pair(w, m):
                                         extracted_dict[w] = m
     except Exception as e:
         st.error(f"PDF 파일 처리 중 오류 발생: {e}")
@@ -84,12 +93,21 @@ def load_pdf_data():
     return extracted_dict
 
 
-# 2. 오답노트 처리
+# 2. 오답노트 처리 (기존에 잘못 들어간 한글 제목 데이터 자동 정제)
 def load_wrong_words():
     if os.path.exists(WRONG_WORDS_FILE):
         try:
             with open(WRONG_WORDS_FILE, "r", encoding="utf-8") as f:
-                return json.load(f)
+                raw_data = json.load(f)
+                # 영단어가 아닌 잘못된 오답 데이터 필터링
+                cleaned_data = {
+                    k: v
+                    for k, v in raw_data.items()
+                    if is_valid_vocab_pair(k, v)
+                }
+                if len(cleaned_data) != len(raw_data):
+                    save_wrong_words(cleaned_data)
+                return cleaned_data
         except Exception:
             return {}
     return {}
@@ -143,7 +161,7 @@ def judge_with_similarity(user_answer, dictionary_meaning):
     return False, "유사도 기준과 일치하지 않습니다."
 
 
-# 통합 주관식 채점 함수 (토글 상태에 따라 AI 또는 유사도 모드 실행)
+# 통합 주관식 채점 함수
 def evaluate_subjective(
     english_word, user_answer, dictionary_meaning, use_ai=True
 ):
@@ -151,7 +169,6 @@ def evaluate_subjective(
     if not u_raw:
         return False, "답변이 입력되지 않았습니다."
 
-    # 1차: 완전 일치 및 접사 정규화 빠른 검사 (API 호출 절약)
     u_clean = re.sub(r"\s+", "", u_raw).lower()
     d_clean = re.sub(r"\s+", "", dictionary_meaning.strip()).lower()
     if u_clean in d_clean or d_clean in u_clean:
@@ -162,7 +179,6 @@ def evaluate_subjective(
     if u_norm and (u_norm in d_norm or d_norm in u_norm):
         return True, "접사/표현 차이를 반영하여 정답으로 인정되었습니다."
 
-    # 2차: AI 유연 채점 모드가 켜져 있을 경우 Gemini API 호출
     if use_ai:
         client = get_ai_client()
         if client:
@@ -217,13 +233,13 @@ def evaluate_subjective(
             except Exception as e:
                 print(f"AI 채점 오류 (유사도 모드로 전환): {e}")
 
-    # 3차: AI 모드가 꺼져 있거나 API 호출 실패 시 스마트 유사도 판별 실행
     return judge_with_similarity(user_answer, dictionary_meaning)
 
 
-# 세션 상태 초기화
-if "word_dict" not in st.session_state:
-    st.session_state.word_dict = load_pdf_data()
+# 세션 상태 초기화 (새 필터가 적용된 단어장 로드)
+word_dict = load_pdf_data()
+st.session_state.word_dict = word_dict
+
 if "wrong_words" not in st.session_state:
     st.session_state.wrong_words = load_wrong_words()
 if "quiz_mode" not in st.session_state:
@@ -247,13 +263,18 @@ if "feedback" not in st.session_state:
 if "last_was_wrong" not in st.session_state:
     st.session_state.last_was_wrong = False
 
-word_dict = st.session_state.word_dict
-
 if not word_dict:
     st.error(
         f"'{PDF_FILE_NAME}' 파일을 찾을 수 없거나 단어를 추출하지 못했습니다."
     )
     st.stop()
+
+# 현재 출제 중인 단어가 한글 제목(유효하지 않은 단어)이면 즉시 새 문제로 교체
+if st.session_state.current_word and (
+    st.session_state.current_word not in word_dict
+    and st.session_state.current_word not in st.session_state.wrong_words
+):
+    st.session_state.current_word = None
 
 
 def get_words_pool():
@@ -376,7 +397,9 @@ with info_col1:
             f"**점수:** {st.session_state.score} / {st.session_state.total_asked}"
         )
 with info_col2:
-    st.caption(f"**누적 오답:** {len(st.session_state.wrong_words)}개")
+    st.caption(
+        f"**총 단어:** {len(word_dict)}개 | **누적 오답:** {len(st.session_state.wrong_words)}개"
+    )
 
 # 20문제 게임 완료 체크
 if (
