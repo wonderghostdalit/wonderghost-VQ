@@ -15,6 +15,7 @@ st.set_page_config(
 
 PDF_FILE_NAME = "단어장.pdf"
 WRONG_WORDS_FILE = "wrong_words.json"
+GEMINI_MODEL_NAME = "gemini-3.8-flash"  # 최신 지원 모델로 업데이트
 
 
 # Gemini API 클라이언트 초기화
@@ -54,7 +55,7 @@ def generate_etymology_analysis(english_word, korean_meaning):
         3. 🔗 **같은 접두사·어근 확장 단어 (2개):** (이 원리를 그대로 적용해 외울 수 있는 실용/학술 영단어 2개와 분해 풀이 제시)
         """
         response = client.models.generate_content(
-            model="gemini-2.5-flash", contents=prompt
+            model=GEMINI_MODEL_NAME, contents=prompt
         )
         return response.text.strip()
     except Exception as e:
@@ -226,7 +227,7 @@ def evaluate_subjective(
                 반드시 첫 줄에 'CORRECT' 또는 'INCORRECT'만 출력하고, 둘째 줄에 학습자에게 도움이 되는 짧은 피드백 한 문장을 작성하세요.
                 """
                 response = client.models.generate_content(
-                    model="gemini-2.5-flash", contents=prompt
+                    model=GEMINI_MODEL_NAME, contents=prompt
                 )
                 text_res = response.text.strip()
                 lines = [
@@ -287,8 +288,6 @@ if "last_was_wrong" not in st.session_state:
     st.session_state.last_was_wrong = False
 if "etymology_cache" not in st.session_state:
     st.session_state.etymology_cache = {}
-if "current_etymology" not in st.session_state:
-    st.session_state.current_etymology = None
 if "question_counter" not in st.session_state:
     st.session_state.question_counter = 0
 
@@ -338,7 +337,6 @@ def next_question():
     st.session_state.answered = False
     st.session_state.feedback = None
     st.session_state.last_was_wrong = False
-    st.session_state.current_etymology = None
     st.session_state.question_counter += 1
 
 
@@ -563,31 +561,25 @@ if st.session_state.feedback:
     else:
         st.error(fb_msg)
 
-# 정답 제출 후 추가 기능 및 Enter 키 다음 문제 단축키 연동
+# 정답 제출 후 추가 기능 (오답 시 자동 어원 풀이 / 수동 인정 / 다음 문제)
 if st.session_state.answered:
-    # 1. 어원·접두사·어근 논리 분석 버튼
+    # 1. 오답일 경우 버튼을 누르지 않아도 즉시 자동으로 어원·형태소 풀이 출력
     if st.session_state.last_was_wrong:
-        if st.button(
-            "🧩 접두사·어근 분해해서 논리적으로 외우기",
-            use_container_width=True,
-        ):
-            if curr_word in st.session_state.etymology_cache:
-                st.session_state.current_etymology = (
-                    st.session_state.etymology_cache[curr_word]
+        if curr_word not in st.session_state.etymology_cache:
+            with st.spinner("🧩 틀린 단어의 접두사·어근 구조를 자동 분석 중..."):
+                analysis = generate_etymology_analysis(
+                    curr_word, correct_meaning
                 )
-            else:
-                with st.spinner("🧩 접두사·어근 구조 분석 중..."):
-                    analysis = generate_etymology_analysis(
-                        curr_word, correct_meaning
-                    )
+                # 에러가 아닌 정상 응답일 때만 캐시에 영구 보관
+                if not analysis.startswith("⚠️"):
                     st.session_state.etymology_cache[curr_word] = analysis
-                    st.session_state.current_etymology = analysis
+                current_etym = analysis
+        else:
+            current_etym = st.session_state.etymology_cache[curr_word]
 
-    # 생성된 어원 분해 풀이 카드 출력
-    if st.session_state.current_etymology:
         with st.container(border=True):
             st.markdown(f"#### 🧩 **{curr_word}** 어원·형태소 구조 풀이")
-            st.markdown(st.session_state.current_etymology)
+            st.markdown(current_etym)
 
     # 2. 주관식 수동 정답 인정 안전장치
     if (
@@ -616,7 +608,7 @@ if st.session_state.answered:
         next_question()
         st.rerun()
 
-    # 키보드 Enter 키 감지하여 '다음 문제 ➔' 버튼 자동 실행 + 새 문제 입력창 자동 포커스
+    # 키보드 Enter 키 감지하여 '다음 문제 ➔' 버튼 자동 실행
     components.html(
         """
         <script>
@@ -639,7 +631,7 @@ if st.session_state.answered:
         height=0,
     )
 else:
-    # 새 문제가 출제되면 주관식 입력창에 마우스 클릭 없이 바로 타자 칠 수 있도록 자동 포커스
+    # 새 문제가 출제되면 주관식 입력창에 자동 포커스
     if st.session_state.question_type == "subjective":
         components.html(
             """
