@@ -6,6 +6,7 @@ import re
 from google import genai
 import pdfplumber
 import streamlit as st
+import streamlit.components.v1 as components
 
 # 페이지 기본 설정
 st.set_page_config(
@@ -33,23 +34,47 @@ def get_ai_client():
     return None
 
 
+# 어원·접두사·어근 논리 분해 AI 생성 함수
+def generate_etymology_analysis(english_word, korean_meaning):
+    client = get_ai_client()
+    if not client:
+        return "⚠️ Gemini API 키가 연결되어 있지 않아 어원 분석을 생성할 수 없습니다. Streamlit Secrets에 GEMINI_API_KEY를 등록해 주세요."
+
+    try:
+        prompt = f"""
+        당신은 영어 어원학(Etymology)과 형태소 분석에 정통한 일타 강사입니다.
+        학습자가 아래 영어 표현의 뜻을 논리적으로 이해하고 추론할 수 있도록, 단어의 구성 요소(접두사·어근·접미사 또는 핵심 단어 결합)를 블록 조립하듯 명쾌하게 분해해서 설명해 주세요. (억지 발음 연상이나 말장난은 절대 쓰지 마세요.)
+
+        - 영단어/표현: {english_word}
+        - 한글 뜻: {korean_meaning}
+
+        [작성 형식 - 반드시 아래 3가지 구조로 명확하고 논리적으로 작성]
+        1. 🧩 **형태소 분해:** (예: `ab-` (반대·이탈) + `normal` (정상적인) 형태처럼 접두사/어근/접미사 또는 숙어의 핵심 단어를 쪼개서 각각의 기본 의미를 명시)
+        2. 💡 **의미 도출 논리:** (분해된 조각들의 의미가 어떻게 합쳐져서 최종적으로 '{korean_meaning}'이라는 뜻이 되는지 한 줄로 명쾌하게 연결)
+        3. 🔗 **같은 접두사·어근 확장 단어 (2개):** (이 원리를 그대로 적용해 외울 수 있는 실용/학술 영단어 2개와 분해 풀이 제시)
+        """
+        response = client.models.generate_content(
+            model="gemini-2.5-flash", contents=prompt
+        )
+        return response.text.strip()
+    except Exception as e:
+        return f"⚠️ 어원 분석 생성 중 오류가 발생했습니다: {e}"
+
+
 # 유효한 영단어-한글뜻 쌍인지 검증하는 필터 함수
 def is_valid_vocab_pair(word, meaning):
     if not word or not meaning:
         return False
-    # 제외할 헤더 키워드
     if word in ["영어", "목차", "단어", "표현"] or meaning in ["한글 뜻", "암기", "뜻", "의미"]:
         return False
-    # 1. 첫 번째 칸(영단어)에 반드시 영어 알파벳이 1개 이상 포함되어야 함 (한글 제목/소제목 차단)
     if not re.search(r"[a-zA-Z]", word):
         return False
-    # 2. 두 번째 칸(한글 뜻)에 반드시 한글이 1개 이상 포함되어야 함
     if not re.search(r"[가-힣]", meaning):
         return False
     return True
 
 
-# 1. PDF 데이터 로드 및 파싱 (영단어 필터링 적용)
+# 1. PDF 데이터 로드 및 파싱
 @st.cache_data
 def load_pdf_data():
     extracted_dict = {}
@@ -65,7 +90,6 @@ def load_pdf_data():
                         if len(row) >= 2:
                             w = re.sub(r"[★☐Πコロ]", "", row[0] or "").strip()
                             m = re.sub(r"[★☐Πコロ]", "", row[1] or "").strip()
-                            # 줄바꿈이 포함된 셀 정리
                             w = re.sub(r"\s+", " ", w)
                             m = re.sub(r"\s+", " ", m)
                             if is_valid_vocab_pair(w, m):
@@ -93,13 +117,12 @@ def load_pdf_data():
     return extracted_dict
 
 
-# 2. 오답노트 처리 (기존에 잘못 들어간 한글 제목 데이터 자동 정제)
+# 2. 오답노트 처리
 def load_wrong_words():
     if os.path.exists(WRONG_WORDS_FILE):
         try:
             with open(WRONG_WORDS_FILE, "r", encoding="utf-8") as f:
                 raw_data = json.load(f)
-                # 영단어가 아닌 잘못된 오답 데이터 필터링
                 cleaned_data = {
                     k: v
                     for k, v in raw_data.items()
@@ -128,7 +151,7 @@ def normalize_korean(text):
     return cleaned
 
 
-# 스마트 유사도 판별 단독 함수 (빠른 로컬 채점)
+# 스마트 유사도 판별 단독 함수
 def judge_with_similarity(user_answer, dictionary_meaning):
     u_raw = user_answer.strip()
     u_clean = re.sub(r"\s+", "", u_raw).lower()
@@ -236,7 +259,7 @@ def evaluate_subjective(
     return judge_with_similarity(user_answer, dictionary_meaning)
 
 
-# 세션 상태 초기화 (새 필터가 적용된 단어장 로드)
+# 세션 상태 초기화
 word_dict = load_pdf_data()
 st.session_state.word_dict = word_dict
 
@@ -262,6 +285,12 @@ if "feedback" not in st.session_state:
     st.session_state.feedback = None
 if "last_was_wrong" not in st.session_state:
     st.session_state.last_was_wrong = False
+if "etymology_cache" not in st.session_state:
+    st.session_state.etymology_cache = {}
+if "current_etymology" not in st.session_state:
+    st.session_state.current_etymology = None
+if "question_counter" not in st.session_state:
+    st.session_state.question_counter = 0
 
 if not word_dict:
     st.error(
@@ -269,7 +298,6 @@ if not word_dict:
     )
     st.stop()
 
-# 현재 출제 중인 단어가 한글 제목(유효하지 않은 단어)이면 즉시 새 문제로 교체
 if st.session_state.current_word and (
     st.session_state.current_word not in word_dict
     and st.session_state.current_word not in st.session_state.wrong_words
@@ -310,6 +338,8 @@ def next_question():
     st.session_state.answered = False
     st.session_state.feedback = None
     st.session_state.last_was_wrong = False
+    st.session_state.current_etymology = None
+    st.session_state.question_counter += 1
 
 
 if st.session_state.current_word is None:
@@ -465,19 +495,21 @@ if st.session_state.question_type == "choice":
             st.rerun()
 
 # --------------------------------------------------
-# 모드 2: 주관식 채점 (AI 유연 모드 / 스마트 유사도 모드 선택 가능)
+# 모드 2: 주관식 채점
 # --------------------------------------------------
 else:
-    with st.form(key="subjective_form", clear_on_submit=False):
+    q_idx = st.session_state.question_counter
+    with st.form(key=f"subjective_form_{q_idx}", clear_on_submit=False):
         user_ans = st.text_input(
-            "단어의 뜻을 입력하세요:",
+            "단어의 뜻을 입력하세요 (엔터: 제출 / 결과 확인 후 엔터 한 번 더: 다음 문제):",
             placeholder="단어의 뜻을 자유롭게 입력하세요...",
             disabled=st.session_state.answered,
+            key=f"input_{q_idx}",
         )
         btn_label = (
-            "🤖 AI 심사 제출"
+            "🤖 AI 심사 제출 (Enter)"
             if (st.session_state.use_ai_grading and get_ai_client())
-            else "⚡ 정답 제출"
+            else "⚡ 정답 제출 (Enter)"
         )
         submit_btn = st.form_submit_button(
             btn_label,
@@ -523,7 +555,7 @@ else:
 
             st.rerun()
 
-# 결과 피드백 및 수동 보정 / 다음 문제 버튼
+# 결과 피드백 영역
 if st.session_state.feedback:
     fb_type, fb_msg = st.session_state.feedback
     if fb_type == "success":
@@ -531,7 +563,33 @@ if st.session_state.feedback:
     else:
         st.error(fb_msg)
 
+# 정답 제출 후 추가 기능 및 Enter 키 다음 문제 단축키 연동
 if st.session_state.answered:
+    # 1. 어원·접두사·어근 논리 분석 버튼
+    if st.session_state.last_was_wrong:
+        if st.button(
+            "🧩 접두사·어근 분해해서 논리적으로 외우기",
+            use_container_width=True,
+        ):
+            if curr_word in st.session_state.etymology_cache:
+                st.session_state.current_etymology = (
+                    st.session_state.etymology_cache[curr_word]
+                )
+            else:
+                with st.spinner("🧩 접두사·어근 구조 분석 중..."):
+                    analysis = generate_etymology_analysis(
+                        curr_word, correct_meaning
+                    )
+                    st.session_state.etymology_cache[curr_word] = analysis
+                    st.session_state.current_etymology = analysis
+
+    # 생성된 어원 분해 풀이 카드 출력
+    if st.session_state.current_etymology:
+        with st.container(border=True):
+            st.markdown(f"#### 🧩 **{curr_word}** 어원·형태소 구조 풀이")
+            st.markdown(st.session_state.current_etymology)
+
+    # 2. 주관식 수동 정답 인정 안전장치
     if (
         st.session_state.last_was_wrong
         and st.session_state.question_type == "subjective"
@@ -551,6 +609,52 @@ if st.session_state.answered:
                 save_wrong_words(st.session_state.wrong_words)
             st.rerun()
 
-    if st.button("다음 문제 ➔", type="primary", use_container_width=True):
+    # 3. 다음 문제 이동 버튼
+    if st.button(
+        "다음 문제 ➔ (Enter)", type="primary", use_container_width=True
+    ):
         next_question()
         st.rerun()
+
+    # 키보드 Enter 키 감지하여 '다음 문제 ➔' 버튼 자동 실행 + 새 문제 입력창 자동 포커스
+    components.html(
+        """
+        <script>
+        const doc = window.parent.document;
+        if (!window.parent._nextEnterListenerAdded) {
+            window.parent._nextEnterListenerAdded = true;
+            doc.addEventListener('keydown', function(e) {
+                if (e.key === 'Enter' && !e.isComposing) {
+                    const buttons = Array.from(doc.querySelectorAll('button'));
+                    const nextBtn = buttons.find(b => b.innerText.includes('다음 문제 ➔'));
+                    if (nextBtn) {
+                        e.preventDefault();
+                        nextBtn.click();
+                    }
+                }
+            });
+        }
+        </script>
+        """,
+        height=0,
+    )
+else:
+    # 새 문제가 출제되면 주관식 입력창에 마우스 클릭 없이 바로 타자 칠 수 있도록 자동 포커스
+    if st.session_state.question_type == "subjective":
+        components.html(
+            """
+            <script>
+            const doc = window.parent.document;
+            setTimeout(() => {
+                const inputs = doc.querySelectorAll('input[type="text"]');
+                if (inputs.length > 0) {
+                    const activeInput = inputs[inputs.length - 1];
+                    if (!activeInput.disabled) {
+                        activeInput.focus();
+                    }
+                }
+            }, 150);
+            </script>
+            """,
+            height=0,
+        )
