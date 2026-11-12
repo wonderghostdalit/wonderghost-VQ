@@ -15,7 +15,7 @@ PDF_FILE_NAME = "단어장.pdf"
 WRONG_WORDS_FILE = "wrong_words.json"
 
 
-# Gemini API 클라이언트 초기화 (Streamlit Secrets에서 키 탐색)
+# Gemini API 클라이언트 초기화
 def get_ai_client():
     api_key = os.environ.get("GEMINI_API_KEY") or st.secrets.get(
         "GEMINI_API_KEY"
@@ -98,48 +98,55 @@ def save_wrong_words(wrong_dict):
         print(f"오답노트 저장 실패: {e}")
 
 
-# AI 유연 채점 함수 (의미가 통하면 정답 인정)
+# [개선됨] AI 초유연 채점 함수
 def judge_with_ai(english_word, user_answer, dictionary_meaning):
-    # 1차: 규칙 기반 완전/문자열 일치 빠른 검사
     u_clean = re.sub(r"\s+", "", user_answer.strip()).lower()
     d_clean = re.sub(r"\s+", "", dictionary_meaning.strip()).lower()
 
-    if u_clean and (u_clean in d_clean or d_clean in u_clean):
-        return True, "정확히 일치합니다."
+    if not u_clean:
+        return False, "답변이 입력되지 않았습니다."
 
-    # 2차: AI API를 이용한 정교한 번역 의미 검증
+    # 1차: 빠른 문자열 포함 검사
+    if u_clean in d_clean or d_clean in u_clean:
+        return True, "사전 뜻과 직접 일치합니다."
+
+    # 2차: AI API를 이용한 관대한 학술·번역 의미 판별
     client = get_ai_client()
     if client:
         try:
             prompt = f"""
-            영어 단어 '{english_word}'의 사전적 뜻은 '{dictionary_meaning}'입니다.
-            사용자가 입력한 답변: '{user_answer}'
+            당신은 대학원 영어 시험 대비를 돕는 관대하고 유연한 채점관입니다.
             
-            사용자가 입력한 답변이 사전적 뜻과 한국어 번역상 의미가 통하거나 유의어/동의어로 정답 처리할 수 있는지 판단해 주세요.
-            반드시 첫 줄에 'CORRECT' 또는 'INCORRECT'로만 판단 결과를 적고, 둘째 줄에 짧은 사유를 작성해 주세요.
+            - 출제 영어 표현: '{english_word}'
+            - 단어장 기준 뜻: '{dictionary_meaning}'
+            - 학습자 입력 답안: '{user_answer}'
+            
+            [채점 기준 - 매우 유연하게 적용할 것]
+            1. 단어장 뜻과 글자가 다르더라도, 실제 영어 독해에서 자연스럽게 통하는 유의어, 동의어, 의역 표현이라면 무조건 정답(CORRECT)으로 인정하세요.
+               (예: '완화하다' -> '줄이다', '경감시키다', '약화시키다' 모두 정답)
+               (예: '역량강화' -> '힘을 실어줌', '권한 부여', '스스로 해결하는 힘' 모두 정답)
+            2. 품사 차이(명사형 vs 동사형 vs 형용사형, 예: '사정' vs '평가하다')나 조사/어미 차이는 무시하고 핵심 의미가 맞으면 정답(CORRECT) 처리하세요.
+            3. 영어 단어 자체가 가진 다른 일반적/학술적 뜻으로 정확히 해석한 경우에도 정답(CORRECT)으로 인정하세요.
+            4. 완전히 반대되는 뜻이거나 전혀 엉뚱한 단어인 경우에만 오답(INCORRECT) 처리하세요.
+            
+            반드시 첫 줄에 'CORRECT' 또는 'INCORRECT'만 출력하고, 둘째 줄에 학습자에게 도움이 되는 짧은 피드백 한 문장을 작성하세요.
             """
             response = client.models.generate_content(
                 model="gemini-2.5-flash", contents=prompt
             )
             text_res = response.text.strip()
-            if text_res.startswith("CORRECT"):
-                reason = (
-                    text_res.split("\n")[1]
-                    if "\n" in text_res
-                    else "의미상 동의어로 인정되었습니다."
-                )
+            lines = [line.strip() for line in text_res.split("\n") if line.strip()]
+            
+            if lines and "CORRECT" in lines[0].upper() and "INCORRECT" not in lines[0].upper():
+                reason = lines[1] if len(lines) > 1 else "문맥상 의미가 통해 정답으로 인정되었습니다."
                 return True, reason
             else:
-                reason = (
-                    text_res.split("\n")[1]
-                    if "\n" in text_res
-                    else "사전적 의미와 차이가 있습니다."
-                )
+                reason = lines[1] if len(lines) > 1 else "핵심 의미와 다소 거리가 있습니다."
                 return False, reason
         except Exception as e:
             print(f"AI 채점 중 오류 발생: {e}")
 
-    # API 키가 없거나 실패 시 유연 규칙 백업 채점
+    # API 실패 시 백업 키워드 검사
     keywords = [
         k.strip() for k in dictionary_meaning.replace("/", ",").split(",") if k
     ]
@@ -346,7 +353,7 @@ else:
     with st.form(key="subjective_form", clear_on_submit=False):
         user_ans = st.text_input(
             "단어의 뜻을 입력하세요:",
-            placeholder="동의어나 유의어로 자유롭게 적어보세요...",
+            placeholder="의미가 통하는 표현이면 자유롭게 정답 인정됩니다...",
             disabled=st.session_state.answered,
         )
         submit_btn = st.form_submit_button(
@@ -359,7 +366,7 @@ else:
             st.session_state.answered = True
             st.session_state.total_asked += 1
 
-            with st.spinner("🤖 AI가 의미 판별 중..."):
+            with st.spinner("🤖 AI가 문맥과 의미를 유연하게 심사 중..."):
                 is_correct, reason = judge_with_ai(
                     curr_word, user_ans, correct_meaning
                 )
@@ -368,7 +375,7 @@ else:
                 st.session_state.score += 1
                 st.session_state.feedback = (
                     "success",
-                    f"⭕ 정답입니다! ({reason})\n- 사전 뜻: {correct_meaning}",
+                    f"⭕ 정답입니다! ({reason})\n- 단어장 뜻: {correct_meaning}",
                 )
                 if curr_word in st.session_state.wrong_words:
                     del st.session_state.wrong_words[curr_word]
@@ -376,7 +383,7 @@ else:
             else:
                 st.session_state.feedback = (
                     "error",
-                    f"❌ 오답입니다. ({reason})\n- 제출한 답: {user_ans}\n- 사전 뜻: {correct_meaning}",
+                    f"❌ 오답입니다. ({reason})\n- 제출한 답: {user_ans}\n- 단어장 뜻: {correct_meaning}",
                 )
                 st.session_state.wrong_words[curr_word] = correct_meaning
                 save_wrong_words(st.session_state.wrong_words)
