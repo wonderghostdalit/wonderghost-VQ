@@ -1,3 +1,4 @@
+from difflib import SequenceMatcher
 import json
 import os
 import random
@@ -17,9 +18,13 @@ WRONG_WORDS_FILE = "wrong_words.json"
 
 # Gemini API 클라이언트 초기화
 def get_ai_client():
-    api_key = os.environ.get("GEMINI_API_KEY") or st.secrets.get(
-        "GEMINI_API_KEY"
-    )
+    api_key = os.environ.get("GEMINI_API_KEY")
+    if not api_key:
+        try:
+            api_key = st.secrets.get("GEMINI_API_KEY")
+        except Exception:
+            api_key = None
+
     if api_key:
         try:
             return genai.Client(api_key=api_key)
@@ -98,36 +103,53 @@ def save_wrong_words(wrong_dict):
         print(f"오답노트 저장 실패: {e}")
 
 
-# [개선됨] AI 초유연 채점 함수
-def judge_with_ai(english_word, user_answer, dictionary_meaning):
-    u_clean = re.sub(r"\s+", "", user_answer.strip()).lower()
-    d_clean = re.sub(r"\s+", "", dictionary_meaning.strip()).lower()
+# 한국어 접사/조사 정규화 보조 함수 ('예방적 서비스' -> '예방서비스')
+def normalize_korean(text):
+    cleaned = re.sub(r"\s+", "", text.strip()).lower()
+    # 번역 과정에서 자주 붙는 '-적', '-의', '-한' 등 제거
+    cleaned = re.sub(r"(적|의|한)(?=[가-힣])", "", cleaned)
+    return cleaned
 
-    if not u_clean:
+
+# [개선됨] AI 초유연 채점 + 접사/유사도 스마트 판별 함수
+def judge_with_ai(english_word, user_answer, dictionary_meaning):
+    u_raw = user_answer.strip()
+    if not u_raw:
         return False, "답변이 입력되지 않았습니다."
 
-    # 1차: 빠른 문자열 포함 검사
-    if u_clean in d_clean or d_clean in u_clean:
-        return True, "사전 뜻과 직접 일치합니다."
+    u_clean = re.sub(r"\s+", "", u_raw).lower()
+    d_clean = re.sub(r"\s+", "", dictionary_meaning.strip()).lower()
 
-    # 2차: AI API를 이용한 관대한 학술·번역 의미 판별
+    # 1차: 완전 일치 및 포함 검사
+    if u_clean in d_clean or d_clean in u_clean:
+        return True, "사전 뜻과 일치합니다."
+
+    # 2차: 한국어 접사('-적', '-의' 등) 제거 후 일치 검사 ('예방적 서비스' == '예방서비스')
+    u_norm = normalize_korean(u_raw)
+    d_norm = normalize_korean(dictionary_meaning)
+    if u_norm and (u_norm in d_norm or d_norm in u_norm):
+        return True, "접사/표현 차이를 반영하여 정답으로 인정되었습니다."
+
+    # 3차: AI API를 이용한 관대한 번역·문맥 의미 판별
     client = get_ai_client()
     if client:
         try:
             prompt = f"""
-            당신은 대학원 영어 시험 대비를 돕는 관대하고 유연한 채점관입니다.
+            당신은 대학원 영어 시험 대비를 돕는 매우 관대하고 유연한 채점관입니다.
             
             - 출제 영어 표현: '{english_word}'
             - 단어장 기준 뜻: '{dictionary_meaning}'
             - 학습자 입력 답안: '{user_answer}'
             
-            [채점 기준 - 매우 유연하게 적용할 것]
-            1. 단어장 뜻과 글자가 다르더라도, 실제 영어 독해에서 자연스럽게 통하는 유의어, 동의어, 의역 표현이라면 무조건 정답(CORRECT)으로 인정하세요.
-               (예: '완화하다' -> '줄이다', '경감시키다', '약화시키다' 모두 정답)
-               (예: '역량강화' -> '힘을 실어줌', '권한 부여', '스스로 해결하는 힘' 모두 정답)
-            2. 품사 차이(명사형 vs 동사형 vs 형용사형, 예: '사정' vs '평가하다')나 조사/어미 차이는 무시하고 핵심 의미가 맞으면 정답(CORRECT) 처리하세요.
-            3. 영어 단어 자체가 가진 다른 일반적/학술적 뜻으로 정확히 해석한 경우에도 정답(CORRECT)으로 인정하세요.
-            4. 완전히 반대되는 뜻이거나 전혀 엉뚱한 단어인 경우에만 오답(INCORRECT) 처리하세요.
+            [절대 준수 채점 원칙]
+            1. 한국어 번역 특성상 붙거나 빠지는 접사·조사 차이('-적', '-의', '-한', '-화', '-성' 등)는 100% 동일한 정답(CORRECT)으로 인정하세요.
+               * 핵심 예시: '예방서비스' <-> '예방적 서비스' (무조건 CORRECT)
+               * 핵심 예시: '구조불평등' <-> '구조적 불평등' (무조건 CORRECT)
+               * 핵심 예시: '심리재활' <-> '심리적 재활' (무조건 CORRECT)
+            2. 글자가 다르더라도 영어 독해 문맥상 뜻이 통하는 유의어, 동의어, 자연스러운 의역이면 모두 정답(CORRECT)으로 인정하세요.
+               * 예시: '완화하다' <-> '줄이다', '경감시키다', '약화시키다' (CORRECT)
+            3. 품사 차이(명사형 vs 동사형 vs 형용사형, 예: '사정' <-> '평가하다')나 띄어쓰기 차이는 무시하고 핵심 의미가 맞으면 정답(CORRECT) 처리하세요.
+            4. 전혀 다른 엉뚱한 뜻이나 반대 의미일 때만 오답(INCORRECT) 처리하세요.
             
             반드시 첫 줄에 'CORRECT' 또는 'INCORRECT'만 출력하고, 둘째 줄에 학습자에게 도움이 되는 짧은 피드백 한 문장을 작성하세요.
             """
@@ -135,26 +157,46 @@ def judge_with_ai(english_word, user_answer, dictionary_meaning):
                 model="gemini-2.5-flash", contents=prompt
             )
             text_res = response.text.strip()
-            lines = [line.strip() for line in text_res.split("\n") if line.strip()]
-            
-            if lines and "CORRECT" in lines[0].upper() and "INCORRECT" not in lines[0].upper():
-                reason = lines[1] if len(lines) > 1 else "문맥상 의미가 통해 정답으로 인정되었습니다."
+            lines = [
+                line.strip() for line in text_res.split("\n") if line.strip()
+            ]
+
+            if (
+                lines
+                and "CORRECT" in lines[0].upper()
+                and "INCORRECT" not in lines[0].upper()
+            ):
+                reason = (
+                    lines[1]
+                    if len(lines) > 1
+                    else "문맥상 의미가 통해 정답으로 인정되었습니다."
+                )
                 return True, reason
             else:
-                reason = lines[1] if len(lines) > 1 else "핵심 의미와 다소 거리가 있습니다."
+                reason = (
+                    lines[1]
+                    if len(lines) > 1
+                    else "핵심 의미와 다소 거리가 있습니다."
+                )
                 return False, reason
         except Exception as e:
             print(f"AI 채점 중 오류 발생: {e}")
 
-    # API 실패 시 백업 키워드 검사
+    # 4차: API 미연결 시 백업 키워드 및 문자열 유사도(75% 이상) 검사
     keywords = [
         k.strip() for k in dictionary_meaning.replace("/", ",").split(",") if k
     ]
     for kw in keywords:
-        kw_clean = re.sub(r"\s+", "", kw).lower()
-        if kw_clean and (kw_clean in u_clean or u_clean in kw_clean):
-            return True, "핵심 단어가 일치합니다."
-    return False, "의미가 일치하지 않습니다."
+        kw_norm = normalize_korean(kw)
+        if not kw_norm:
+            continue
+        if kw_norm in u_norm or u_norm in kw_norm:
+            return True, "핵심 의미가 일치합니다."
+        similarity = SequenceMatcher(None, u_norm, kw_norm).ratio()
+        if similarity >= 0.75:
+            return True, "유사한 표현으로 정답 인정되었습니다."
+
+    return False, "사전적 의미와 일치하지 않습니다."
 
 
 # 세션 상태 초기화
@@ -239,6 +281,17 @@ if new_q_type != st.session_state.question_type:
     st.session_state.question_type = new_q_type
     next_question()
     st.rerun()
+
+# AI 주관식 선택 시 연결 상태 안내
+if st.session_state.question_type == "subjective":
+    if get_ai_client():
+        st.caption(
+            "🟢 AI 유연 채점 활성화됨 (접사·유의어·의역 표현 자동 정답 인정)"
+        )
+    else:
+        st.caption(
+            "🟡 스마트 유사도 채점 모드 (접사 및 키워드 유사도 기반 자동 정답 인정)"
+        )
 
 # 2. 게임 모드 선택 버튼
 col1, col2, col3 = st.columns(3)
