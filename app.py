@@ -18,11 +18,11 @@ st.set_page_config(
 PDF_FILE_NAME = "단어장.pdf"
 WRONG_WORDS_FILE = "wrong_words.json"
 
-# 503 서버 혼잡을 피하기 위한 다중 모델 우선순위 리스트
-FALLBACK_MODELS = [
-    "gemini-3.8-flash-lite",
-    "gemini-3.8-flash",
+# 503 서버 혼잡 우회용 안정 모델 리스트
+ETYMOLOGY_MODELS = [
+    "gemini-2.5-flash",
     "gemini-2.0-flash",
+    "gemini-2.0-flash-lite",
 ]
 
 
@@ -44,63 +44,50 @@ def get_ai_client():
     return None
 
 
-# 503 서버 과부하 시 다른 모델로 자동 우회(Fallback) 호출하는 안전 함수
-def call_gemini_with_fallback(prompt, max_tokens=300, temp=0.2):
+# 틀린 단어 전용: AI 어원·접두사·어근 논리 분해 생성 함수
+def generate_etymology_analysis(english_word, korean_meaning):
     client = get_ai_client()
     if not client:
-        return None, "API_KEY_MISSING"
+        return "⚠️ Gemini API 키가 연결되어 있지 않아 어원 분석을 생성할 수 없습니다. Streamlit Secrets에 GEMINI_API_KEY를 등록해 주세요."
+
+    prompt = f"""
+    당신은 영어 어원학(Etymology)과 형태소 분석에 정통한 일타 강사입니다.
+    학습자가 아래 영어 표현을 틀렸습니다. 단어의 구성 요소(접두사·어근·접미사 또는 핵심 단어 결합)를 논리적으로 분해해서 뜻을 추론할 수 있도록 설명해 주세요. (억지 발음 연상이나 말장난은 절대 쓰지 마세요.)
+
+    - 영단어/표현: {english_word}
+    - 한글 뜻: {korean_meaning}
+
+    [작성 형식 - 반드시 아래 3가지 구조로 명확하고 간결하게 작성]
+    1. 🧩 **형태소 분해:** (예: `ab-` (반대·이탈) + `normal` (정상적인) 형태처럼 접두사/어근/접미사 각각의 기본 의미 명시)
+    2. 💡 **의미 도출 논리:** (분해된 조각들이 어떻게 합쳐져서 '{korean_meaning}'이라는 뜻이 되는지 한 줄 연결)
+    3. 🔗 **같은 접두사·어근 확장 단어 (2개):** (이 원리를 그대로 적용할 수 있는 영단어 2개와 짧은 분해 풀이)
+    """
 
     last_error = ""
-    for model_name in FALLBACK_MODELS:
+    for model_name in ETYMOLOGY_MODELS:
         try:
             response = client.models.generate_content(
                 model=model_name,
                 contents=prompt,
                 config=types.GenerateContentConfig(
-                    max_output_tokens=max_tokens,
-                    temperature=temp,
+                    max_output_tokens=350,
+                    temperature=0.3,
                 ),
             )
             if response and response.text:
-                return response.text.strip(), None
+                return response.text.strip()
         except Exception as e:
             last_error = str(e)
-            # 503(서버 혼잡) 또는 429(속도 제한) 시 짧은 대기 후 다음 예비 모델로 즉시 전환
             if any(
                 code in last_error
-                for code in ["503", "429", "UNAVAILABLE", "overloaded"]
+                for code in ["503", "429", "404", "UNAVAILABLE", "overloaded"]
             ):
-                time.sleep(0.5)
+                time.sleep(0.4)
                 continue
             else:
                 break
 
-    return None, last_error
-
-
-# 어원·접두사·어근 논리 분해 AI 생성 함수
-def generate_etymology_analysis(english_word, korean_meaning):
-    prompt = f"""
-    당신은 영어 어원학(Etymology)과 형태소 분석에 정통한 강사입니다.
-    학습자가 아래 영어 표현의 뜻을 논리적으로 이해하고 추론할 수 있도록, 구성 요소(접두사·어근·접미사 또는 핵심 단어 결합)를 분해해서 설명해 주세요. (발음 연상/말장난 금지)
-
-    - 영단어/표현: {english_word}
-    - 한글 뜻: {korean_meaning}
-
-    [작성 형식]
-    1. 🧩 **형태소 분해:** (예: `ab-` (반대·이탈) + `normal` (정상적인))
-    2. 💡 **의미 도출 논리:** (합쳐져서 '{korean_meaning}'이 되는 논리 1문장)
-    3. 🔗 **확장 단어 (2개):** (같은 접두사·어근 단어 2개와 짧은 분해)
-    """
-    result_text, err = call_gemini_with_fallback(
-        prompt, max_tokens=350, temp=0.3
-    )
-
-    if result_text:
-        return result_text
-    if err == "API_KEY_MISSING":
-        return "⚠️ Gemini API 키가 연결되어 있지 않습니다. Streamlit Secrets에 GEMINI_API_KEY를 등록해 주세요."
-    return f"⚠️ 현재 구글 AI 서버 접속량이 많아 일시적으로 지연되고 있습니다. 아래 '다시 분석하기' 버튼을 눌러주세요.\n(상세 코드: {err[:80]}...)"
+    return f"⚠️ 현재 구글 AI 서버 접속량이 많아 일시적으로 지연되고 있습니다. 아래 '🔄 어원 분석 다시 시도하기' 버튼을 눌러주세요.\n(상세: {last_error[:90]})"
 
 
 # 유효한 영단어-한글뜻 쌍인지 검증하는 필터 함수
@@ -186,27 +173,33 @@ def save_wrong_words(wrong_dict):
         print(f"오답노트 저장 실패: {e}")
 
 
-# 한국어 접사/조사 정규화 보조 함수
+# 한국어 접사/조사 정규화 보조 함수 ('예방적 서비스' -> '예방서비스')
 def normalize_korean(text):
     cleaned = re.sub(r"\s+", "", text.strip()).lower()
     cleaned = re.sub(r"(적|의|한)(?=[가-힣])", "", cleaned)
     return cleaned
 
 
-# 스마트 유사도 판별 단독 함수
-def judge_with_similarity(user_answer, dictionary_meaning, threshold=0.65):
+# 초고속 스마트 유사도 판별 함수 (0.01초 즉시 채점)
+def evaluate_subjective_fast(user_answer, dictionary_meaning):
     u_raw = user_answer.strip()
+    if not u_raw:
+        return False, "답변이 입력되지 않았습니다."
+
     u_clean = re.sub(r"\s+", "", u_raw).lower()
     d_clean = re.sub(r"\s+", "", dictionary_meaning.strip()).lower()
 
+    # 1. 직접 포함 여부
     if u_clean in d_clean or d_clean in u_clean:
-        return True, "사전 뜻과 직접 일치합니다."
+        return True, "사전 뜻과 일치합니다."
 
+    # 2. 한국어 접사('-적', '-의', '-한') 제거 후 일치 여부
     u_norm = normalize_korean(u_raw)
     d_norm = normalize_korean(dictionary_meaning)
     if u_norm and (u_norm in d_norm or d_norm in u_norm):
-        return True, "접사 및 표현 차이를 반영하여 정답 인정되었습니다."
+        return True, "표현·접사 차이를 반영하여 정답 인정되었습니다."
 
+    # 3. 쉼표/슬래시 구분 키워드별 부분 일치 및 유사도(65% 이상) 검사
     keywords = [
         k.strip() for k in dictionary_meaning.replace("/", ",").split(",") if k
     ]
@@ -217,61 +210,13 @@ def judge_with_similarity(user_answer, dictionary_meaning, threshold=0.65):
         if kw_norm in u_norm or u_norm in kw_norm:
             return True, "핵심 키워드가 일치합니다."
         similarity = SequenceMatcher(None, u_norm, kw_norm).ratio()
-        if similarity >= threshold:
+        if similarity >= 0.65:
             return (
                 True,
                 f"유사도 기준({int(similarity*100)}%)을 통과하여 정답 인정되었습니다.",
             )
 
-    return False, "유사도 기준과 일치하지 않습니다."
-
-
-# 통합 주관식 채점 함수 (다중 모델 Fallback 적용)
-def evaluate_subjective(
-    english_word, user_answer, dictionary_meaning, use_ai=True
-):
-    u_raw = user_answer.strip()
-    if not u_raw:
-        return False, "답변이 입력되지 않았습니다."
-
-    # 1단계: API 통신 없는 즉각 로컬 고속 필터
-    is_fast_match, fast_reason = judge_with_similarity(
-        u_raw, dictionary_meaning, threshold=0.80
-    )
-    if is_fast_match:
-        return True, fast_reason
-
-    # 2단계: 다중 AI 모델 자동 우회 호출
-    if use_ai:
-        prompt = (
-            f"영단어 '{english_word}'의 뜻은 '{dictionary_meaning}', 답안은 '{user_answer}'이다. "
-            f"유의어, 의역, 품사/접사('-적','-의') 차이는 관대하게 정답 인정한다. "
-            f"첫 줄에 CORRECT 또는 INCORRECT만, 둘째 줄에 짧은 이유 15자 이내로 출력하라."
-        )
-        text_res, err = call_gemini_with_fallback(
-            prompt, max_tokens=60, temp=0.1
-        )
-        if text_res:
-            lines = [
-                line.strip() for line in text_res.split("\n") if line.strip()
-            ]
-            if (
-                lines
-                and "CORRECT" in lines[0].upper()
-                and "INCORRECT" not in lines[0].upper()
-            ):
-                reason = (
-                    lines[1] if len(lines) > 1 else "유의어로 인정되었습니다."
-                )
-                return True, reason
-            else:
-                reason = (
-                    lines[1] if len(lines) > 1 else "사전적 의미와 다릅니다."
-                )
-                return False, reason
-
-    # 3단계: 모든 AI 모델이 503 혼잡이거나 AI 미사용 시 기본 유사도 판정으로 자동 전환
-    return judge_with_similarity(user_answer, dictionary_meaning, threshold=0.65)
+    return False, "사전적 의미와 일치하지 않습니다."
 
 
 # 세션 상태 초기화
@@ -284,8 +229,6 @@ if "quiz_mode" not in st.session_state:
     st.session_state.quiz_mode = "practice"
 if "question_type" not in st.session_state:
     st.session_state.question_type = "choice"
-if "use_ai_grading" not in st.session_state:
-    st.session_state.use_ai_grading = True
 if "current_word" not in st.session_state:
     st.session_state.current_word = None
 if "current_options" not in st.session_state:
@@ -372,29 +315,15 @@ if new_q_type != st.session_state.question_type:
     next_question()
     st.rerun()
 
-# 주관식 선택 시 채점 엔진 ON/OFF 토글 스위치 제공
-if st.session_state.question_type == "subjective":
-    ai_available = get_ai_client() is not None
-
-    use_ai = st.toggle(
-        "🤖 AI 유연 채점 모드 켜기 (끄면 초고속 스마트 유사도 채점 모드로 동작)",
-        value=st.session_state.use_ai_grading,
-        disabled=not ai_available,
+# 오답 시 자동 AI 어원 분석 안내
+if get_ai_client():
+    st.caption(
+        "🟢 **오답 시 AI 형태소·어원 자동 풀이 활성화됨** (맞힌 문제는 즉시 통과, 틀린 단어만 AI가 어원 분해)"
     )
-    st.session_state.use_ai_grading = use_ai
-
-    if not ai_available:
-        st.caption(
-            "⚠️ API 키가 등록되지 않아 자동으로 **🟡 스마트 유사도 채점 모드**가 적용됩니다."
-        )
-    elif use_ai:
-        st.caption(
-            "🟢 **AI 고속 유연 채점 활성화됨**: 서버 혼잡 시 예비 모델로 자동 전환됩니다."
-        )
-    else:
-        st.caption(
-            "🟡 **스마트 유사도 채점 모드**: API 대기 시간 없이 접사·키워드 유사도로 즉시 채점합니다."
-        )
+else:
+    st.caption(
+        "⚠️ Gemini API 키 미등록 상태입니다. Secrets에 키를 등록하면 오답 시 AI 어원 풀이가 제공됩니다."
+    )
 
 # 2. 게임 모드 선택 버튼
 col1, col2, col3 = st.columns(3)
@@ -507,7 +436,7 @@ if st.session_state.question_type == "choice":
             st.rerun()
 
 # --------------------------------------------------
-# 모드 2: 주관식 채점
+# 모드 2: 주관식 채점 (초고속 즉시 판별)
 # --------------------------------------------------
 else:
     q_idx = st.session_state.question_counter
@@ -518,13 +447,8 @@ else:
             disabled=st.session_state.answered,
             key=f"input_{q_idx}",
         )
-        btn_label = (
-            "🤖 AI 심사 제출 (Enter)"
-            if (st.session_state.use_ai_grading and get_ai_client())
-            else "⚡ 정답 제출 (Enter)"
-        )
         submit_btn = st.form_submit_button(
-            btn_label,
+            "⚡ 정답 제출 (Enter)",
             use_container_width=True,
             disabled=st.session_state.answered,
         )
@@ -533,18 +457,9 @@ else:
             st.session_state.answered = True
             st.session_state.total_asked += 1
 
-            active_ai = st.session_state.use_ai_grading and (
-                get_ai_client() is not None
+            is_correct, reason = evaluate_subjective_fast(
+                user_ans, correct_meaning
             )
-            if active_ai:
-                with st.spinner("⚡ 채점 중..."):
-                    is_correct, reason = evaluate_subjective(
-                        curr_word, user_ans, correct_meaning, use_ai=True
-                    )
-            else:
-                is_correct, reason = evaluate_subjective(
-                    curr_word, user_ans, correct_meaning, use_ai=False
-                )
 
             if is_correct:
                 st.session_state.score += 1
@@ -575,11 +490,11 @@ if st.session_state.feedback:
     else:
         st.error(fb_msg)
 
-# 정답 제출 후 추가 기능
+# 정답 제출 후 추가 기능 (오답일 때만 AI 형태소·어원 풀이 실행)
 if st.session_state.answered:
     if st.session_state.last_was_wrong:
         if curr_word not in st.session_state.etymology_cache:
-            with st.spinner("🧩 접두사·어근 구조 분석 중..."):
+            with st.spinner("🧩 틀린 단어의 접두사·어근 형태소 분석 중..."):
                 analysis = generate_etymology_analysis(
                     curr_word, correct_meaning
                 )
@@ -592,11 +507,11 @@ if st.session_state.answered:
         with st.container(border=True):
             st.markdown(f"#### 🧩 **{curr_word}** 어원·형태소 구조 풀이")
             st.markdown(current_etym)
-            # 서버 혼잡으로 실패했을 때 즉시 재시도할 수 있는 버튼
             if current_etym.startswith("⚠️"):
                 if st.button("🔄 어원 분석 다시 시도하기", key="retry_etym"):
                     st.rerun()
 
+    # 주관식 수동 정답 인정 안전장치
     if (
         st.session_state.last_was_wrong
         and st.session_state.question_type == "subjective"
