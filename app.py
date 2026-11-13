@@ -103,6 +103,44 @@ def is_valid_vocab_pair(word, meaning):
     return True
 
 
+# [신규] 영단어 및 한글 뜻 패턴 기반 품사·유형 자동 분류 함수
+def classify_pos(word, meaning):
+    w_clean = word.strip()
+    # 첫 번째 대표 뜻 기준으로 끝맺음 어미 분석
+    primary_m = re.split(r"[,/]", meaning)[0].strip()
+    # 괄호 안 부가설명 제거
+    primary_m = re.sub(r"\([^)]*\)", "", primary_m).strip()
+
+    # 1. 숙어·구동사·구문 (공백이 포함된 2단어 이상 표현)
+    if " " in w_clean:
+        return "숙어·구문"
+
+    # 2. 부사 (-ly 접미사 또는 '~하게', '~히', '~적으로' 종료)
+    if (
+        w_clean.lower().endswith("ly")
+        and len(w_clean) > 4
+        or re.search(r"(하게|히|적으로|로서|로써)$", primary_m)
+    ):
+        return "부사"
+
+    # 3. 동사 ('~하다', '~되다', '~시키다', '~주다', '~받다', '~지다', '~이다' 등 용언 종결형)
+    if re.search(
+        r"(하다|되다|시키다|주다|받다|지다|나다|내다|가다|오다|두다|보다|삼다|입다|얻다|잃다|막다|돕다|찾다|품다|겪다|맺다|풀다|잇다|짓다|끄다|쓰다|트다|크다)$",
+        primary_m,
+    ):
+        return "동사"
+
+    # 4. 형용사 ('~적인', '~한', '~된', '~할', '~없는', '~있는', '~스러운', '~로운' 등 관형형)
+    if re.search(
+        r"(적인|한|된|할|없는|있는|스러운|로운|다운|같은|높은|낮은|많은|적은|큰|작은|새로운|오래된|중요한|주요한)$",
+        primary_m,
+    ):
+        return "형용사"
+
+    # 5. 나머지 일반 명사 및 개념어
+    return "명사·기타"
+
+
 # 1. PDF 데이터 로드 및 파싱
 @st.cache_data
 def load_pdf_data():
@@ -173,14 +211,14 @@ def save_wrong_words(wrong_dict):
         print(f"오답노트 저장 실패: {e}")
 
 
-# 한국어 접사/조사 정규화 보조 함수 ('예방적 서비스' -> '예방서비스')
+# 한국어 접사/조사 정규화 보조 함수
 def normalize_korean(text):
     cleaned = re.sub(r"\s+", "", text.strip()).lower()
     cleaned = re.sub(r"(적|의|한)(?=[가-힣])", "", cleaned)
     return cleaned
 
 
-# 초고속 스마트 유사도 판별 함수 (0.01초 즉시 채점)
+# 초고속 스마트 유사도 판별 함수
 def evaluate_subjective_fast(user_answer, dictionary_meaning):
     u_raw = user_answer.strip()
     if not u_raw:
@@ -189,17 +227,14 @@ def evaluate_subjective_fast(user_answer, dictionary_meaning):
     u_clean = re.sub(r"\s+", "", u_raw).lower()
     d_clean = re.sub(r"\s+", "", dictionary_meaning.strip()).lower()
 
-    # 1. 직접 포함 여부
     if u_clean in d_clean or d_clean in u_clean:
         return True, "사전 뜻과 일치합니다."
 
-    # 2. 한국어 접사('-적', '-의', '-한') 제거 후 일치 여부
     u_norm = normalize_korean(u_raw)
     d_norm = normalize_korean(dictionary_meaning)
     if u_norm and (u_norm in d_norm or d_norm in u_norm):
         return True, "표현·접사 차이를 반영하여 정답 인정되었습니다."
 
-    # 3. 쉼표/슬래시 구분 키워드별 부분 일치 및 유사도(65% 이상) 검사
     keywords = [
         k.strip() for k in dictionary_meaning.replace("/", ",").split(",") if k
     ]
@@ -223,12 +258,23 @@ def evaluate_subjective_fast(user_answer, dictionary_meaning):
 word_dict = load_pdf_data()
 st.session_state.word_dict = word_dict
 
+if not word_dict:
+    st.error(
+        f"'{PDF_FILE_NAME}' 파일을 찾을 수 없거나 단어를 추출하지 못했습니다."
+    )
+    st.stop()
+
+# 단어별 품사 매핑 딕셔너리 생성
+pos_map = {w: classify_pos(w, m) for w, m in word_dict.items()}
+
 if "wrong_words" not in st.session_state:
     st.session_state.wrong_words = load_wrong_words()
 if "quiz_mode" not in st.session_state:
     st.session_state.quiz_mode = "practice"
 if "question_type" not in st.session_state:
     st.session_state.question_type = "choice"
+if "pos_filter" not in st.session_state:
+    st.session_state.pos_filter = "전체"
 if "current_word" not in st.session_state:
     st.session_state.current_word = None
 if "current_options" not in st.session_state:
@@ -248,12 +294,6 @@ if "etymology_cache" not in st.session_state:
 if "question_counter" not in st.session_state:
     st.session_state.question_counter = 0
 
-if not word_dict:
-    st.error(
-        f"'{PDF_FILE_NAME}' 파일을 찾을 수 없거나 단어를 추출하지 못했습니다."
-    )
-    st.stop()
-
 if st.session_state.current_word and (
     st.session_state.current_word not in word_dict
     and st.session_state.current_word not in st.session_state.wrong_words
@@ -261,10 +301,26 @@ if st.session_state.current_word and (
     st.session_state.current_word = None
 
 
+# 현재 모드 + 품사 필터가 모두 반영된 출제 단어 풀 반환
 def get_words_pool():
     if st.session_state.quiz_mode == "wrong_only":
-        return list(st.session_state.wrong_words.keys())
-    return list(word_dict.keys())
+        base_pool = list(st.session_state.wrong_words.keys())
+    else:
+        base_pool = list(word_dict.keys())
+
+    selected_pos = st.session_state.pos_filter
+    if selected_pos == "전체":
+        return base_pool
+
+    return [
+        w
+        for w in base_pool
+        if classify_pos(
+            w,
+            st.session_state.wrong_words.get(w, word_dict.get(w, "")),
+        )
+        == selected_pos
+    ]
 
 
 def next_question():
@@ -281,10 +337,21 @@ def next_question():
         else:
             correct_meaning = word_dict.get(curr_w, "")
 
-        all_meanings = list(word_dict.values())
-        wrong_options = [m for m in all_meanings if m != correct_meaning]
-        sample_count = min(3, len(wrong_options))
+        # 객관식 보기도 가급적 같은 품사군에서 먼저 뽑아 난이도와 자연스러움 향상
+        curr_pos = classify_pos(curr_w, correct_meaning)
+        same_pos_meanings = [
+            m
+            for w, m in word_dict.items()
+            if m != correct_meaning and pos_map.get(w) == curr_pos
+        ]
+        if len(same_pos_meanings) >= 3:
+            wrong_options = same_pos_meanings
+        else:
+            wrong_options = [
+                m for m in word_dict.values() if m != correct_meaning
+            ]
 
+        sample_count = min(3, len(wrong_options))
         options = random.sample(wrong_options, sample_count) + [
             correct_meaning
         ]
@@ -315,17 +382,32 @@ if new_q_type != st.session_state.question_type:
     next_question()
     st.rerun()
 
-# 오답 시 자동 AI 어원 분석 안내
-if get_ai_client():
-    st.caption(
-        "🟢 **오답 시 AI 형태소·어원 자동 풀이 활성화됨** (맞힌 문제는 즉시 통과, 틀린 단어만 AI가 어원 분해)"
+# 2. 품사·유형별 필터 선택 영역
+pos_categories = ["전체", "동사", "형용사", "부사", "숙어·구문", "명사·기타"]
+pos_counts = {
+    cat: (
+        len(word_dict)
+        if cat == "전체"
+        else sum(1 for v in pos_map.values() if v == cat)
     )
-else:
-    st.caption(
-        "⚠️ Gemini API 키 미등록 상태입니다. Secrets에 키를 등록하면 오답 시 AI 어원 풀이가 제공됩니다."
-    )
+    for cat in pos_categories
+}
 
-# 2. 게임 모드 선택 버튼
+selected_pos = st.selectbox(
+    "🏷️ 품사·유형별 집중 학습 필터",
+    options=pos_categories,
+    index=pos_categories.index(st.session_state.pos_filter),
+    format_func=lambda x: f"{x} ({pos_counts[x]}개)",
+)
+
+if selected_pos != st.session_state.pos_filter:
+    st.session_state.pos_filter = selected_pos
+    st.session_state.score = 0
+    st.session_state.total_asked = 0
+    next_question()
+    st.rerun()
+
+# 3. 게임 모드 선택 버튼
 col1, col2, col3 = st.columns(3)
 with col1:
     if st.button("일반 연습", use_container_width=True):
@@ -357,6 +439,7 @@ with col3:
 st.divider()
 
 # 점수판
+active_pool_count = len(get_words_pool())
 info_col1, info_col2 = st.columns(2)
 with info_col1:
     if st.session_state.quiz_mode == "game_20":
@@ -369,7 +452,7 @@ with info_col1:
         )
 with info_col2:
     st.caption(
-        f"**총 단어:** {len(word_dict)}개 | **누적 오답:** {len(st.session_state.wrong_words)}개"
+        f"**현재 범위({st.session_state.pos_filter}):** {active_pool_count}개 | **누적 오답:** {len(st.session_state.wrong_words)}개"
     )
 
 # 20문제 게임 완료 체크
@@ -391,7 +474,9 @@ if (
 # 문제 출력 카드
 curr_word = st.session_state.current_word
 if not curr_word:
-    st.warning("출제할 단어가 없습니다.")
+    st.warning(
+        f"선택하신 **'{st.session_state.pos_filter}'** 분류에 해당하는 출제 단어가 없습니다. 다른 품사나 '전체'를 선택해 주세요."
+    )
     st.stop()
 
 if st.session_state.quiz_mode == "wrong_only":
@@ -399,7 +484,8 @@ if st.session_state.quiz_mode == "wrong_only":
 else:
     correct_meaning = word_dict.get(curr_word, "")
 
-st.info(f"### **{curr_word}**")
+curr_word_pos = classify_pos(curr_word, correct_meaning)
+st.info(f"`[{curr_word_pos}]`\n### **{curr_word}**")
 
 # --------------------------------------------------
 # 모드 1: 4지선다 객관식
